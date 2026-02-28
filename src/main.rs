@@ -15,6 +15,7 @@
 use clap::Parser;
 use std::env;
 use std::process::Command;
+use std::path::Path;
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -48,6 +49,46 @@ struct CliFlags {
     nofetch: bool,
 }
 
+/// Determines whether to perform Git operations over HTTP or SSH
+#[derive(Debug)]
+enum Transport {
+    HTTP,
+    SSH,
+}
+
+
+/// Determines whether to use native Git repositories or git-backed Jujutsu repositories. In the JJ
+/// case, the --colocate flag is used to ensure Git compatibility.
+#[derive(Debug)]
+enum Vcs {
+    Git,
+    JJ,
+}
+
+/// Set the amount of output to the console during normal operations
+#[derive(Debug)]
+enum Verbosity {
+    Quiet, // Output nothing
+    Normal, // Normal status and progress output
+    Verbose, // Error and debug information in addition to normal output
+}
+
+/// Parsed configuration with CLI flags parsed into some ergonomic types
+#[derive(Debug)]
+struct Config {
+    org: String,
+    transport: Transport,
+    verbosity: Verbosity,
+    vcs: Vcs, 
+    nofetch: bool,
+    path: Path,
+}
+impl Config {
+    fn new_from_cli(flags: CliFlags) -> Config {
+
+    }
+}
+
 fn main() {
     let cli_flags = CliFlags::parse();
 
@@ -58,6 +99,16 @@ fn main() {
     dbg!(cli_flags);
     dbg!(token);
 }
+
+
+
+
+fn get_org_repositories(cli_flags: &CliFlags, token: &str) {
+
+
+}
+
+
 
 /// Get GitHub token from the environment. Early return on successfully finding a token
 fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
