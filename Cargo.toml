@@ -1,0 +1,9 @@
+[package]
+name = "gorc"
+version = "0.1.0"
+authors = ["Allyn Bottorff"]
+license = "Apache-2.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.60", features = ["derive"] }
