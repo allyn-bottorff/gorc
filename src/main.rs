@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::Parser;
 use std::env;
+use std::path::PathBuf;
 use std::process::Command;
-use std::path::Path;
+use clap::Parser;
+use reqwest;
+use tokio;
+use anyhow::Result;
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -39,10 +42,10 @@ struct CliFlags {
     #[arg(short, long)]
     jj: bool,
     ///No output
-    #[arg(short, long, default_value_t = false)]
+    #[arg(short, long, default_value_t = false, conflicts_with = "verbose")]
     quiet: bool,
     ///Verbose output
-    #[arg(short, long, default_value_t = false)]
+    #[arg(short, long, default_value_t = false, conflicts_with = "quiet")]
     verbose: bool,
     ///Do not fetch updates to remote repositories, only clone new ones.
     #[arg(long, default_value_t = false)]
@@ -56,7 +59,6 @@ enum Transport {
     SSH,
 }
 
-
 /// Determines whether to use native Git repositories or git-backed Jujutsu repositories. In the JJ
 /// case, the --colocate flag is used to ensure Git compatibility.
 #[derive(Debug)]
@@ -68,47 +70,79 @@ enum Vcs {
 /// Set the amount of output to the console during normal operations
 #[derive(Debug)]
 enum Verbosity {
-    Quiet, // Output nothing
-    Normal, // Normal status and progress output
+    Quiet,   // Output nothing
+    Normal,  // Normal status and progress output
     Verbose, // Error and debug information in addition to normal output
 }
 
-/// Parsed configuration with CLI flags parsed into some ergonomic types
+/// Parsed configuration with CLI flags converted into some ergonomic types
 #[derive(Debug)]
 struct Config {
     org: String,
     transport: Transport,
     verbosity: Verbosity,
-    vcs: Vcs, 
+    vcs: Vcs,
     nofetch: bool,
-    path: Path,
+    path: PathBuf,
 }
 impl Config {
-    fn new_from_cli(flags: CliFlags) -> Config {
+    fn new_from_flags(flags: &CliFlags) -> Config {
+        let transport = match flags.http {
+            true => Transport::HTTP,
+            false => Transport::SSH,
+        };
+        let verbosity = match flags.quiet {
+            true => Verbosity::Quiet,
+            false => match flags.verbose {
+                true => Verbosity::Verbose,
+                false => Verbosity::Normal,
+            },
+        };
+        let vcs = match flags.jj {
+            true => Vcs::JJ,
+            false => Vcs::Git,
+        };
 
+        Config {
+            org: flags.org.trim().into(),
+            transport,
+            verbosity,
+            vcs,
+            nofetch: flags.nofetch,
+            path: flags.path.clone().trim().into(),
+        }
     }
 }
 
-fn main() {
+
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli_flags = CliFlags::parse();
 
-    println!("gorc!");
 
-    let token = get_github_token(&cli_flags).expect("Unable to get GitHub token from the environment.");
+    let token =
+        get_github_token(&cli_flags).expect("Unable to get GitHub token from the environment.");
+
+    let config = Config::new_from_flags(&cli_flags);
 
     dbg!(cli_flags);
+    dbg!(config);
     dbg!(token);
+    println!("gorc!");
+    Ok(())
 }
 
+async fn get_org_repositories(config: &Config, token: &str) -> Result<()> {
+    let url_base = format!("https://api.github.com/orgs/{}/repos",config.org);
+    let url = reqwest::Url::parse_with_params(&url_base, &[("per_page", "100")])?;
 
 
+    let client = reqwest::Client::new();
+    let resp = client.get(url).header("Authorization", token).send().await?;
 
-fn get_org_repositories(cli_flags: &CliFlags, token: &str) {
-
+    Ok(())
 
 }
-
-
 
 /// Get GitHub token from the environment. Early return on successfully finding a token
 fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
