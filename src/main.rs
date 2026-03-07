@@ -15,11 +15,13 @@
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
+use std::fs;
 use clap::Parser;
 use reqwest;
 use tokio;
 use anyhow::Result;
 use serde::Deserialize;
+use futures;
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -122,7 +124,7 @@ impl Config {
             verbosity,
             vcs,
             nofetch: flags.nofetch,
-            path: flags.path.clone().trim().into(),
+            path: fs::canonicalize(flags.path.clone().trim()).unwrap(),
         }
     }
 }
@@ -146,7 +148,13 @@ async fn main() -> Result<()> {
         }
     };
 
+    let mut tasks = vec![];
+    for repo in &repos {
+        let task = clone_one_repo(&config, &repo);
+        tasks.push(task);
+    }
 
+    futures::future::join_all(tasks).await;
 
     dbg!(cli_flags);
     dbg!(config);
@@ -233,4 +241,37 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
         }
     }
     None
+}
+
+/// Clone a single repository using either Git or JJ depending on the configuration
+async fn clone_one_repo(config: &Config, repo: &GHRepo) -> Result<tokio::process::Child, std::io::Error> {
+
+    let url = match config.transport {
+    Transport::HTTP => &repo.clone_url.clone(),
+    Transport::SSH => &repo.ssh_url.clone(),
+    };
+
+    println!("Cloning:     {}", &repo.name);
+    let result = match config.vcs {
+        Vcs::Git => {
+            tokio::process::Command::new("git")
+                .current_dir(&config.path.clone())
+                .arg("clone")
+                .arg(&url)
+                .spawn()
+        },
+        Vcs::JJ => {
+            tokio::process::Command::new("jj")
+                .current_dir(&config.path.clone())
+                .arg("git")
+                .arg("clone")
+                .arg("--colocate")
+                .arg(&url)
+                .spawn()
+        }
+    };
+    println!("Complete:    {}", &repo.name.clone());
+
+    return result
+
 }
