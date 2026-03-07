@@ -19,6 +19,7 @@ use clap::Parser;
 use reqwest;
 use tokio;
 use anyhow::Result;
+use serde::Deserialize;
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -75,6 +76,18 @@ enum Verbosity {
     Verbose, // Error and debug information in addition to normal output
 }
 
+#[derive(Debug, Deserialize)]
+struct GHRepo {
+    /// Name of the repository according to GitHub
+    name: String,
+    /// Git protocol url
+    git_url: String,
+    /// SSH clone url
+    ssh_url: String,
+    /// HTTP clone url
+    clone_url: String,
+}
+
 /// Parsed configuration with CLI flags converted into some ergonomic types
 #[derive(Debug)]
 struct Config {
@@ -125,22 +138,38 @@ async fn main() -> Result<()> {
 
     let config = Config::new_from_flags(&cli_flags);
 
+    let repos = match get_org_repositories(&config, &token).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to get org repositories: {}\n", e);
+            panic!();
+        }
+    };
+
+
+
     dbg!(cli_flags);
     dbg!(config);
     dbg!(token);
+    dbg!(repos);
     println!("gorc!");
     Ok(())
 }
 
-async fn get_org_repositories(config: &Config, token: &str) -> Result<()> {
+async fn get_org_repositories(config: &Config, token: &str) -> Result<Vec<GHRepo>>{
     let url_base = format!("https://api.github.com/orgs/{}/repos",config.org);
     let url = reqwest::Url::parse_with_params(&url_base, &[("per_page", "100")])?;
 
+    // TODO(alb): Handle request pagination
 
     let client = reqwest::Client::new();
-    let resp = client.get(url).header("Authorization", token).send().await?;
+    let resp = client.get(url).header("User-Agent", "gorc").header("Authorization", token).send().await?;
 
-    Ok(())
+    let resp_text = resp.text().await?;
+    // dbg!(&resp_text);
+    let repositories: Vec<GHRepo> = serde_json::from_str(&resp_text)?;
+
+    Ok(repositories)
 
 }
 
