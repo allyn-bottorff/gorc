@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::env;
-use std::path::PathBuf;
 use std::process::Command;
 use std::fs;
 use clap::Parser;
@@ -98,7 +97,7 @@ struct Config {
     verbosity: Verbosity,
     vcs: Vcs,
     nofetch: bool,
-    path: PathBuf,
+    path: String,
 }
 impl Config {
     fn new_from_flags(flags: &CliFlags) -> Config {
@@ -124,7 +123,7 @@ impl Config {
             verbosity,
             vcs,
             nofetch: flags.nofetch,
-            path: fs::canonicalize(flags.path.clone().trim()).unwrap(),
+            path: flags.path.clone().trim().into(),
         }
     }
 }
@@ -147,6 +146,12 @@ async fn main() -> Result<()> {
             panic!();
         }
     };
+
+
+    // Create the requested path if it doesn't exist
+    fs::create_dir_all(&config.path).unwrap();
+
+
 
     let mut tasks = vec![];
     for repo in &repos {
@@ -247,30 +252,36 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
 async fn clone_one_repo(config: &Config, repo: &GHRepo) -> Result<tokio::process::Child, std::io::Error> {
 
     let url = match config.transport {
-    Transport::HTTP => &repo.clone_url.clone(),
-    Transport::SSH => &repo.ssh_url.clone(),
+    Transport::HTTP => &repo.clone_url,
+    Transport::SSH => &repo.ssh_url,
     };
+
+    let path = fs::canonicalize(&config.path).unwrap();
 
     println!("Cloning:     {}", &repo.name);
     let result = match config.vcs {
         Vcs::Git => {
             tokio::process::Command::new("git")
-                .current_dir(&config.path.clone())
+                .current_dir(path)
                 .arg("clone")
                 .arg(&url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
         },
         Vcs::JJ => {
             tokio::process::Command::new("jj")
-                .current_dir(&config.path.clone())
+                .current_dir(path)
                 .arg("git")
                 .arg("clone")
                 .arg("--colocate")
                 .arg(&url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
         }
     };
-    println!("Complete:    {}", &repo.name.clone());
+    println!("Complete:    {}", &repo.name);
 
     return result
 
