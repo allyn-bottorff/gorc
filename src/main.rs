@@ -16,10 +16,9 @@ use std::env;
 use std::process::Command;
 use std::fs;
 use clap::Parser;
-use reqwest;
-use tokio;
 use anyhow::Result;
 use serde::Deserialize;
+use ureq;
 use futures;
 
 /// GitHub Org Repository Clone (GORC)
@@ -129,8 +128,7 @@ impl Config {
 }
 
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli_flags = CliFlags::parse();
 
 
@@ -169,19 +167,21 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// Get all the repositories allowed by the token
 async fn get_org_repositories(config: &Config, token: &str) -> Result<Vec<GHRepo>>{
     let url_base = format!("https://api.github.com/orgs/{}/repos",config.org);
-    let url = reqwest::Url::parse_with_params(&url_base, &[("per_page", "100")])?;
+    let repositories = ureq::get(url_base)
+        .query("per_page","100")
+        .header("User-Agent", "gorc")
+        .header("Authorization", token)
+        .call()?
+        .body_mut()
+        .read_json::<Vec<GHRepo>>()?;
+
 
     // TODO(alb): Handle request pagination
 
-    let client = reqwest::Client::new();
-    let resp = client.get(url).header("User-Agent", "gorc").header("Authorization", token).send().await?;
-
-    let resp_text = resp.text().await?;
     // dbg!(&resp_text);
-    let repositories: Vec<GHRepo> = serde_json::from_str(&resp_text)?;
-
     Ok(repositories)
 
 }
