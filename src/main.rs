@@ -15,12 +15,15 @@
 use std::env;
 use std::process::Command;
 use std::fs;
+use std::sync::OnceLock;
 use clap::Parser;
 use reqwest;
 use tokio;
 use anyhow::Result;
 use serde::Deserialize;
-use futures;
+
+
+static CONFIG: OnceLock<Config> = OnceLock::new();
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -77,7 +80,7 @@ enum Verbosity {
     Verbose, // Error and debug information in addition to normal output
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct GHRepo {
     /// Name of the repository according to GitHub
     name: String,
@@ -137,9 +140,14 @@ async fn main() -> Result<()> {
     let token =
         get_github_token(&cli_flags).expect("Unable to get GitHub token from the environment.");
 
-    let config = Config::new_from_flags(&cli_flags);
+    match CONFIG.set(Config::new_from_flags(&cli_flags)) {
+        Ok(_) => (),
+        Err(_e) => {
+            panic!("unable to build configuration");
+        }
+    };
 
-    let repos = match get_org_repositories(&config, &token).await {
+    let repos = match get_org_repositories(&token).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to get org repositories: {}\n", e);
@@ -149,28 +157,29 @@ async fn main() -> Result<()> {
 
 
     // Create the requested path if it doesn't exist
-    fs::create_dir_all(&config.path).unwrap();
+    fs::create_dir_all(CONFIG.get().unwrap().path.clone()).unwrap();
 
 
 
-    let mut tasks = vec![];
-    for repo in &repos {
-        let task = clone_one_repo(&config, &repo);
-        tasks.push(task);
+
+    let mut join_set = tokio::task::JoinSet::new();
+    for repo in repos {
+        join_set.spawn(clone_one_repo(repo.clone()));
     }
 
-    futures::future::join_all(tasks).await;
+    join_set.join_all().await;
 
-    dbg!(cli_flags);
-    dbg!(config);
-    dbg!(token);
-    dbg!(repos);
+
+    // dbg!(&cli_flags);
+    // dbg!(&config);
+    // dbg!(&token);
+    // dbg!(&repos);
     println!("gorc!");
     Ok(())
 }
 
-async fn get_org_repositories(config: &Config, token: &str) -> Result<Vec<GHRepo>>{
-    let url_base = format!("https://api.github.com/orgs/{}/repos",config.org);
+async fn get_org_repositories(token: &str) -> Result<Vec<GHRepo>>{
+    let url_base = format!("https://api.github.com/orgs/{}/repos",CONFIG.get().unwrap().org);
     let url = reqwest::Url::parse_with_params(&url_base, &[("per_page", "100")])?;
 
     // TODO(alb): Handle request pagination
@@ -249,17 +258,17 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
 }
 
 /// Clone a single repository using either Git or JJ depending on the configuration
-async fn clone_one_repo(config: &Config, repo: &GHRepo) -> Result<tokio::process::Child, std::io::Error> {
+async fn clone_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
 
-    let url = match config.transport {
+    let url = match CONFIG.get().unwrap().transport {
     Transport::HTTP => &repo.clone_url,
     Transport::SSH => &repo.ssh_url,
     };
 
-    let path = fs::canonicalize(&config.path).unwrap();
+    let path = fs::canonicalize(CONFIG.get().unwrap().path.clone()).unwrap();
 
     println!("Cloning:     {}", &repo.name);
-    let result = match config.vcs {
+    let result = match CONFIG.get().unwrap().vcs {
         Vcs::Git => {
             tokio::process::Command::new("git")
                 .current_dir(path)
@@ -267,7 +276,9 @@ async fn clone_one_repo(config: &Config, repo: &GHRepo) -> Result<tokio::process
                 .arg(&url)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .spawn()
+                .spawn()?
+                .wait()
+                .await
         },
         Vcs::JJ => {
             tokio::process::Command::new("jj")
@@ -278,7 +289,9 @@ async fn clone_one_repo(config: &Config, repo: &GHRepo) -> Result<tokio::process
                 .arg(&url)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .spawn()
+                .spawn()?
+                .wait()
+                .await
         }
     };
     println!("Complete:    {}", &repo.name);
