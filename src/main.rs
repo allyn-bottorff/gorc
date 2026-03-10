@@ -12,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::env;
-use std::process::Command;
-use std::fs;
-use std::sync::OnceLock;
+use anyhow::Result;
 use clap::Parser;
 use reqwest;
-use tokio;
-use anyhow::Result;
 use serde::Deserialize;
-
+use std::env;
+use std::fs;
+use std::process::Command;
+use std::sync::OnceLock;
+use tokio;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -85,7 +84,7 @@ struct GHRepo {
     /// Name of the repository according to GitHub
     name: String,
     /// Git protocol url
-    _git_url: String,
+    git_url: String,
     /// SSH clone url
     ssh_url: String,
     /// HTTP clone url
@@ -131,21 +130,20 @@ impl Config {
     }
 }
 
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli_flags = CliFlags::parse();
 
-
     let token =
         get_github_token(&cli_flags).expect("Unable to get GitHub token from the environment.");
 
-    match CONFIG.set(Config::new_from_flags(&cli_flags)) {
-        Ok(_) => (),
-        Err(_e) => {
-            panic!("unable to build configuration");
-        }
-    };
+    // Create the static CONFIG struct that can be freely referenced everywhere
+    // Abort if this doesn't succeed.
+    CONFIG.set(Config::new_from_flags(&cli_flags)).unwrap();
+
+    // Create a reference for the config for this scope that's a little more ergonomic. If this
+    // can't be accessed, abort.
+    let config = CONFIG.get().unwrap();
 
     let repos = match get_org_repositories(&token).await {
         Ok(r) => r,
@@ -155,48 +153,58 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Create the requested path if it doesn't exist. Abort if this cannot be created.
+    fs::create_dir_all(&config.path)?;
 
-    // Create the requested path if it doesn't exist
-    fs::create_dir_all(&CONFIG.get().unwrap().path).unwrap();
-    let base_path = fs::canonicalize(&CONFIG.get().unwrap().path).unwrap();
-
-
+    // If the base path can't be canonicalized after we've guaranteed its creation, then something
+    // is very wrong and we should bail out.
+    let base_path = fs::canonicalize(&config.path)?;
 
     let mut join_set = tokio::task::JoinSet::new();
     for repo in repos {
-
-        match fs::exists(base_path.join(&repo.name)).unwrap(){
-            true => {
-                join_set.spawn(fetch_one_repo(repo.clone()));
+        match fs::exists(base_path.join(&repo.name)) {
+            Ok(exists) => match exists {
+                true => {
+                    if !config.nofetch {
+                        join_set.spawn(fetch_one_repo(repo.clone()));
+                    }
+                }
+                false => {
+                    join_set.spawn(clone_one_repo(repo.clone()));
+                }
             },
-            false => {
-                join_set.spawn(clone_one_repo(repo.clone()));
+            Err(e) => {
+                eprintln!("Unable to handle path ending at '{}': {}", &repo.name, e);
             }
         }
     }
 
     join_set.join_all().await;
 
-
-    println!("gorc!");
     Ok(())
 }
 
-async fn get_org_repositories(token: &str) -> Result<Vec<GHRepo>>{
-    let url_base = format!("https://api.github.com/orgs/{}/repos",CONFIG.get().unwrap().org);
+async fn get_org_repositories(token: &str) -> Result<Vec<GHRepo>> {
+    let url_base = format!(
+        "https://api.github.com/orgs/{}/repos",
+        CONFIG.get().unwrap().org
+    );
     let url = reqwest::Url::parse_with_params(&url_base, &[("per_page", "100")])?;
 
     // TODO(alb): Handle request pagination
 
     let client = reqwest::Client::new();
-    let resp = client.get(url).header("User-Agent", "gorc").header("Authorization", token).send().await?;
+    let resp = client
+        .get(url)
+        .header("User-Agent", "gorc")
+        .header("Authorization", token)
+        .send()
+        .await?;
 
     let resp_text = resp.text().await?;
-    // dbg!(&resp_text);
     let repositories: Vec<GHRepo> = serde_json::from_str(&resp_text)?;
 
     Ok(repositories)
-
 }
 
 /// Get GitHub token from the environment. Early return on successfully finding a token
@@ -263,19 +271,22 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
 
 /// Clone a single repository using either Git or JJ depending on the configuration
 async fn clone_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
-
     let config = CONFIG.get().unwrap();
     let url = match config.transport {
-    Transport::HTTP => &repo.clone_url,
-    Transport::SSH => &repo.ssh_url,
+        Transport::HTTP => &repo.clone_url,
+        Transport::SSH => &repo.ssh_url,
     };
 
     let path = fs::canonicalize(&config.path).unwrap();
 
     match config.verbosity {
-        Verbosity::Quiet => {},
-        Verbosity::Normal => {println!("Cloning:     {}", &repo.name);},
-        Verbosity::Verbose => {println!("Cloning:     {}", &repo.name);},
+        Verbosity::Quiet => {}
+        Verbosity::Normal => {
+            println!("Cloning:     {}", &repo.name);
+        }
+        Verbosity::Verbose => {
+            println!("Cloning:     {}", &repo.name);
+        }
     }
     let result = match CONFIG.get().unwrap().vcs {
         Vcs::Git => {
@@ -288,7 +299,7 @@ async fn clone_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::i
                 .spawn()?
                 .wait()
                 .await
-        },
+        }
         Vcs::JJ => {
             tokio::process::Command::new("jj")
                 .current_dir(path)
@@ -304,29 +315,36 @@ async fn clone_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::i
         }
     };
     match config.verbosity {
-        Verbosity::Quiet => {},
-        Verbosity::Normal => {println!("Complete:    {}", &repo.name);},
-        Verbosity::Verbose => {println!("Complete:    {}", &repo.name);},
+        Verbosity::Quiet => {}
+        Verbosity::Normal => {
+            println!("Complete:    {}", &repo.name);
+        }
+        Verbosity::Verbose => {
+            println!("Complete:    {}", &repo.name);
+        }
     }
 
-    return result
-
+    return result;
 }
 
 /// Fetch a single repo using either Git or JJ depending on the configuration
 async fn fetch_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
     let config = CONFIG.get().unwrap();
     let url = match config.transport {
-    Transport::HTTP => &repo.clone_url,
-    Transport::SSH => &repo.ssh_url,
+        Transport::HTTP => &repo.clone_url,
+        Transport::SSH => &repo.ssh_url,
     };
 
     let path = fs::canonicalize(&config.path).unwrap();
 
     match config.verbosity {
-        Verbosity::Quiet => {},
-        Verbosity::Normal => {println!("Fetching:    {}", &repo.name);},
-        Verbosity::Verbose => {println!("Fetching:    {}", &repo.name);},
+        Verbosity::Quiet => {}
+        Verbosity::Normal => {
+            println!("Fetching:    {}", &repo.name);
+        }
+        Verbosity::Verbose => {
+            println!("Fetching:    {}", &repo.name);
+        }
     }
 
     let result = match CONFIG.get().unwrap().vcs {
@@ -340,7 +358,7 @@ async fn fetch_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::i
                 .spawn()?
                 .wait()
                 .await
-        },
+        }
         Vcs::JJ => {
             tokio::process::Command::new("jj")
                 .current_dir(path)
@@ -355,12 +373,14 @@ async fn fetch_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::i
         }
     };
     match config.verbosity {
-        Verbosity::Quiet => {},
-        Verbosity::Normal => {println!("Complete:    {}", &repo.name);},
-        Verbosity::Verbose => {println!("Complete:    {}", &repo.name);},
+        Verbosity::Quiet => {}
+        Verbosity::Normal => {
+            println!("Complete:    {}", &repo.name);
+        }
+        Verbosity::Verbose => {
+            println!("Complete:    {}", &repo.name);
+        }
     }
 
-    return result
-
-
+    return result;
 }
