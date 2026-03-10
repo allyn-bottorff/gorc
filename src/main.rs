@@ -85,7 +85,7 @@ struct GHRepo {
     /// Name of the repository according to GitHub
     name: String,
     /// Git protocol url
-    git_url: String,
+    _git_url: String,
     /// SSH clone url
     ssh_url: String,
     /// HTTP clone url
@@ -157,23 +157,27 @@ async fn main() -> Result<()> {
 
 
     // Create the requested path if it doesn't exist
-    fs::create_dir_all(CONFIG.get().unwrap().path.clone()).unwrap();
-
+    fs::create_dir_all(&CONFIG.get().unwrap().path).unwrap();
+    let base_path = fs::canonicalize(&CONFIG.get().unwrap().path).unwrap();
 
 
 
     let mut join_set = tokio::task::JoinSet::new();
     for repo in repos {
-        join_set.spawn(clone_one_repo(repo.clone()));
+
+        match fs::exists(base_path.join(&repo.name)).unwrap(){
+            true => {
+                join_set.spawn(fetch_one_repo(repo.clone()));
+            },
+            false => {
+                join_set.spawn(clone_one_repo(repo.clone()));
+            }
+        }
     }
 
     join_set.join_all().await;
 
 
-    // dbg!(&cli_flags);
-    // dbg!(&config);
-    // dbg!(&token);
-    // dbg!(&repos);
     println!("gorc!");
     Ok(())
 }
@@ -260,14 +264,19 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
 /// Clone a single repository using either Git or JJ depending on the configuration
 async fn clone_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
 
-    let url = match CONFIG.get().unwrap().transport {
+    let config = CONFIG.get().unwrap();
+    let url = match config.transport {
     Transport::HTTP => &repo.clone_url,
     Transport::SSH => &repo.ssh_url,
     };
 
-    let path = fs::canonicalize(CONFIG.get().unwrap().path.clone()).unwrap();
+    let path = fs::canonicalize(&config.path).unwrap();
 
-    println!("Cloning:     {}", &repo.name);
+    match config.verbosity {
+        Verbosity::Quiet => {},
+        Verbosity::Normal => {println!("Cloning:     {}", &repo.name);},
+        Verbosity::Verbose => {println!("Cloning:     {}", &repo.name);},
+    }
     let result = match CONFIG.get().unwrap().vcs {
         Vcs::Git => {
             tokio::process::Command::new("git")
@@ -294,8 +303,64 @@ async fn clone_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::i
                 .await
         }
     };
-    println!("Complete:    {}", &repo.name);
+    match config.verbosity {
+        Verbosity::Quiet => {},
+        Verbosity::Normal => {println!("Complete:    {}", &repo.name);},
+        Verbosity::Verbose => {println!("Complete:    {}", &repo.name);},
+    }
 
     return result
+
+}
+
+/// Fetch a single repo using either Git or JJ depending on the configuration
+async fn fetch_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
+    let config = CONFIG.get().unwrap();
+    let url = match config.transport {
+    Transport::HTTP => &repo.clone_url,
+    Transport::SSH => &repo.ssh_url,
+    };
+
+    let path = fs::canonicalize(&config.path).unwrap();
+
+    match config.verbosity {
+        Verbosity::Quiet => {},
+        Verbosity::Normal => {println!("Fetching:    {}", &repo.name);},
+        Verbosity::Verbose => {println!("Fetching:    {}", &repo.name);},
+    }
+
+    let result = match CONFIG.get().unwrap().vcs {
+        Vcs::Git => {
+            tokio::process::Command::new("git")
+                .current_dir(path)
+                .arg("fetch")
+                .arg(&url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?
+                .wait()
+                .await
+        },
+        Vcs::JJ => {
+            tokio::process::Command::new("jj")
+                .current_dir(path)
+                .arg("git")
+                .arg("fetch")
+                .arg(&url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?
+                .wait()
+                .await
+        }
+    };
+    match config.verbosity {
+        Verbosity::Quiet => {},
+        Verbosity::Normal => {println!("Complete:    {}", &repo.name);},
+        Verbosity::Verbose => {println!("Complete:    {}", &repo.name);},
+    }
+
+    return result
+
 
 }
