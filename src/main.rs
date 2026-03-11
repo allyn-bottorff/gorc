@@ -17,8 +17,8 @@ use clap::Parser;
 use serde::Deserialize;
 use std::env;
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
-use std::sync::OnceLock;
 use tokio;
 use ureq;
 use futures;
@@ -159,19 +159,46 @@ async fn main() -> Result<()> {
 
     // If the base path can't be canonicalized after we've guaranteed its creation, then something
     // is very wrong and we should bail out.
-    // let base_path = fs::canonicalize(&config.path)?;
+    let base_path = fs::canonicalize(&config.path)?;
 
     // let mut join_set = tokio::task::JoinSet::new();
 
-    futures::stream::iter(repos)
-        .map(|repo| clone_one_repo(&config, repo))
-        .buffer_unordered(6)
-        .for_each(|result| async {
-        match result {
-            Ok(_) => {},
-            Err(e) => {println!("{}", e);}
+    match config.nofetch {
+        true => {
+            futures::stream::iter(repos)
+                .filter(|repo| no_existing_repo(&base_path, repo.name.clone()))
+                .map(|repo| clone_one_repo(&config, repo))
+                .buffer_unordered(6)
+                .for_each(|result| async {
+                    match result {
+                        Ok(_) => {},
+                        Err(e) => {println!("{}", e);}
+                    }
+                }).await;
+        },
+        false => {
+            futures::stream::iter(repos)
+                .map(|repo| clone_or_fetch_wrapper(&config, &base_path, repo))
+                .buffer_unordered(6)
+                .for_each(|result| async {
+                    match result {
+                        Ok(_) => {},
+                        Err(e) => {println!("{}", e);}
+                    }
+                }).await;
         }
-    }).await;
+    }
+    // futures::stream::iter(repos)
+    //     .map(|repo| clone_or_fetch_wrapper(&config, &base_path, repo))
+    //     .buffer_unordered(6)
+    //     .for_each(|result| async {
+    //     match result {
+    //         Ok(_) => {},
+    //         Err(e) => {println!("{}", e);}
+    //     }
+    // }).await;
+
+
 
 
     // for repo in repos {
@@ -193,8 +220,23 @@ async fn main() -> Result<()> {
     // }
     //
     // join_set.join_all().await;
+    //
+    
 
     Ok(())
+}
+
+
+// Helper function to determine if a repo already exists by name
+async fn no_existing_repo(base_path: &PathBuf, name: String) -> bool {
+
+    match fs::exists(base_path.join(name)).ok() {
+        Some(exists) => match exists {
+            true => false,
+            false => true,
+        },
+        None => true,
+    }
 }
 
 fn get_org_repositories(config: &Config, token: &str) -> Result<Vec<GHRepo>> {
@@ -275,6 +317,14 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
         }
     }
     None
+}
+
+async fn clone_or_fetch_wrapper(config: &Config, base_path: &PathBuf, repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
+
+    match fs::exists(base_path.join(&repo.name))? {
+        true => fetch_one_repo(config, repo).await,
+        false => clone_one_repo(config, repo).await,
+    }
 }
 
 /// Clone a single repository using either Git or JJ depending on the configuration
