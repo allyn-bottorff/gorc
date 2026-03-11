@@ -85,7 +85,7 @@ struct GHRepo {
     /// Name of the repository according to GitHub
     name: String,
     /// Git protocol url
-    git_url: String,
+    // git_url: String,
     /// SSH clone url
     ssh_url: String,
     /// HTTP clone url
