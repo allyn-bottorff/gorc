@@ -24,7 +24,6 @@ use ureq;
 use futures;
 use futures::StreamExt;
 
-static CONFIG: OnceLock<Config> = OnceLock::new();
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -142,13 +141,12 @@ async fn main() -> Result<()> {
 
     // Create the static CONFIG struct that can be freely referenced everywhere
     // Abort if this doesn't succeed.
-    CONFIG.set(Config::new_from_flags(&cli_flags)).unwrap();
+    let config = Config::new_from_flags(&cli_flags);
 
     // Create a reference for the config for this scope that's a little more ergonomic. If this
     // can't be accessed, abort.
-    let config = CONFIG.get().unwrap();
 
-    let repos = match get_org_repositories(&token) {
+    let repos = match get_org_repositories(&config, &token) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to get org repositories: {}\n", e);
@@ -166,7 +164,7 @@ async fn main() -> Result<()> {
     // let mut join_set = tokio::task::JoinSet::new();
 
     futures::stream::iter(repos)
-        .map(|repo| clone_one_repo(repo))
+        .map(|repo| clone_one_repo(&config, repo))
         .buffer_unordered(6)
         .for_each(|result| async {
         match result {
@@ -199,10 +197,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn get_org_repositories(token: &str) -> Result<Vec<GHRepo>> {
+fn get_org_repositories(config: &Config, token: &str) -> Result<Vec<GHRepo>> {
     let url_base = format!(
         "https://api.github.com/orgs/{}/repos",
-        CONFIG.get().unwrap().org);
+        config.org);
 
     let repositories = ureq::get(url_base)
         .query("per_page","100")
@@ -280,8 +278,7 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
 }
 
 /// Clone a single repository using either Git or JJ depending on the configuration
-async fn clone_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
-    let config = CONFIG.get().unwrap();
+async fn clone_one_repo(config: &Config, repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
     let url = match config.transport {
         Transport::HTTP => &repo.clone_url,
         Transport::SSH => &repo.ssh_url,
@@ -298,7 +295,7 @@ async fn clone_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::i
             println!("Cloning:     {}", &repo.name);
         }
     }
-    let result = match CONFIG.get().unwrap().vcs {
+    let result = match config.vcs {
         Vcs::Git => {
             tokio::process::Command::new("git")
                 .current_dir(path)
@@ -338,8 +335,7 @@ async fn clone_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::i
 }
 
 /// Fetch a single repo using either Git or JJ depending on the configuration
-async fn fetch_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
-    let config = CONFIG.get().unwrap();
+async fn fetch_one_repo(config: &Config, repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
     let url = match config.transport {
         Transport::HTTP => &repo.clone_url,
         Transport::SSH => &repo.ssh_url,
@@ -357,7 +353,7 @@ async fn fetch_one_repo(repo: GHRepo) -> Result<std::process::ExitStatus, std::i
         }
     }
 
-    let result = match CONFIG.get().unwrap().vcs {
+    let result = match config.vcs {
         Vcs::Git => {
             tokio::process::Command::new("git")
                 .current_dir(path)
