@@ -21,6 +21,8 @@ use std::fs;
 use std::process::Command;
 use std::sync::OnceLock;
 use tokio;
+use futures;
+use futures::StreamExt;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -158,28 +160,40 @@ async fn main() -> Result<()> {
 
     // If the base path can't be canonicalized after we've guaranteed its creation, then something
     // is very wrong and we should bail out.
-    let base_path = fs::canonicalize(&config.path)?;
+    // let base_path = fs::canonicalize(&config.path)?;
 
-    let mut join_set = tokio::task::JoinSet::new();
-    for repo in repos {
-        match fs::exists(base_path.join(&repo.name)) {
-            Ok(exists) => match exists {
-                true => {
-                    if !config.nofetch {
-                        join_set.spawn(fetch_one_repo(repo.clone()));
-                    }
-                }
-                false => {
-                    join_set.spawn(clone_one_repo(repo.clone()));
-                }
-            },
-            Err(e) => {
-                eprintln!("Unable to handle path ending at '{}': {}", &repo.name, e);
-            }
+    // let mut join_set = tokio::task::JoinSet::new();
+
+    futures::stream::iter(repos)
+        .map(|repo| clone_one_repo(repo))
+        .buffer_unordered(6)
+        .for_each(|result| async {
+        match result {
+            Ok(_) => {},
+            Err(e) => {println!("{}", e);}
         }
-    }
+    }).await;
 
-    join_set.join_all().await;
+
+    // for repo in repos {
+    //     match fs::exists(base_path.join(&repo.name)) {
+    //         Ok(exists) => match exists {
+    //             true => {
+    //                 if !config.nofetch {
+    //                     join_set.spawn(fetch_one_repo(repo.clone()));
+    //                 }
+    //             }
+    //             false => {
+    //                 join_set.spawn(clone_one_repo(repo.clone()));
+    //             }
+    //         },
+    //         Err(e) => {
+    //             eprintln!("Unable to handle path ending at '{}': {}", &repo.name, e);
+    //         }
+    //     }
+    // }
+    //
+    // join_set.join_all().await;
 
     Ok(())
 }
