@@ -244,10 +244,13 @@ fn get_org_repositories(config: &Config, token: &str) -> Result<Vec<GHRepo>> {
         "https://api.github.com/orgs/{}/repos",
         config.org);
 
+    let token_string = format!("Bearer {}", token);
+
     let repositories = ureq::get(url_base)
         .query("per_page","100")
         .header("User-Agent", "gorc")
-        .header("Authorization", token)
+        .header("Authorization", token_string)
+        .header("Accept", "application/vnd.github+json")
         .call()?
         .body_mut()
         .read_json::<Vec<GHRepo>>()?;
