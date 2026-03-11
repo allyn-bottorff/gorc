@@ -14,13 +14,13 @@
 
 use anyhow::Result;
 use clap::Parser;
-use reqwest;
 use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::process::Command;
 use std::sync::OnceLock;
 use tokio;
+use ureq;
 use futures;
 use futures::StreamExt;
 
@@ -134,6 +134,7 @@ impl Config {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+
     let cli_flags = CliFlags::parse();
 
     let token =
@@ -147,7 +148,7 @@ async fn main() -> Result<()> {
     // can't be accessed, abort.
     let config = CONFIG.get().unwrap();
 
-    let repos = match get_org_repositories(&token).await {
+    let repos = match get_org_repositories(&token) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to get org repositories: {}\n", e);
@@ -198,25 +199,20 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn get_org_repositories(token: &str) -> Result<Vec<GHRepo>> {
+fn get_org_repositories(token: &str) -> Result<Vec<GHRepo>> {
     let url_base = format!(
         "https://api.github.com/orgs/{}/repos",
-        CONFIG.get().unwrap().org
-    );
-    let url = reqwest::Url::parse_with_params(&url_base, &[("per_page", "100")])?;
+        CONFIG.get().unwrap().org);
 
-    // TODO(alb): Handle request pagination
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(url)
+    let repositories = ureq::get(url_base)
+        .query("per_page","100")
         .header("User-Agent", "gorc")
         .header("Authorization", token)
-        .send()
-        .await?;
+        .call()?
+        .body_mut()
+        .read_json::<Vec<GHRepo>>()?;
 
-    let resp_text = resp.text().await?;
-    let repositories: Vec<GHRepo> = serde_json::from_str(&resp_text)?;
+    // TODO(alb): Handle request pagination
 
     Ok(repositories)
 }
