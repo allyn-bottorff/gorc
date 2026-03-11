@@ -15,15 +15,14 @@
 use anyhow::Result;
 use clap::Parser;
 use serde::Deserialize;
-use std::env;
-use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
-use tokio;
+use std::{
+    env, fs,
+    path::PathBuf,
+    process::Command,
+    sync::{Arc, Mutex, mpsc},
+    thread,
+};
 use ureq;
-use futures;
-use futures::StreamExt;
-
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -131,9 +130,79 @@ impl Config {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+pub struct ThreadPool {
+    workers: Vec<Worker>,
+    sender: Option<mpsc::Sender<Job>>,
+}
+impl ThreadPool {
+    pub fn new(size: usize) -> ThreadPool {
+        assert!(size > 0);
 
+        let (sender, receiver) = mpsc::channel();
+        let receiver = Arc::new(Mutex::new(receiver));
+        let mut workers = Vec::with_capacity(size);
+
+        for _id in 0..size {
+            workers.push(Worker::new(Arc::clone(&receiver)));
+        }
+
+        ThreadPool {
+            workers,
+            sender: Some(sender),
+        }
+    }
+
+    pub fn execute<F>(&self, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let job = Box::new(f);
+        self.sender.as_ref().unwrap().send(job).unwrap();
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        for worker in &mut self.workers {
+            if let Some(thread) = worker.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+}
+
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+struct Worker {
+    // id: usize,
+    thread: Option<thread::JoinHandle<()>>,
+}
+impl Worker {
+    fn new(receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
+        let thread = thread::spawn(move || {
+            loop {
+                let message = receiver.lock().unwrap().recv();
+
+                match message {
+                    Ok(job) => {
+                        job();
+                    }
+                    Err(_) => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Worker {
+            // id,
+            thread: Some(thread),
+        }
+    }
+}
+
+fn main() -> Result<()> {
     let cli_flags = CliFlags::parse();
 
     let token =
@@ -141,7 +210,8 @@ async fn main() -> Result<()> {
 
     // Create the static CONFIG struct that can be freely referenced everywhere
     // Abort if this doesn't succeed.
-    let config = Config::new_from_flags(&cli_flags);
+    let config = Box::new(Config::new_from_flags(&cli_flags));
+    let config: &'static Config = Box::leak(config);
 
     // Create a reference for the config for this scope that's a little more ergonomic. If this
     // can't be accessed, abort.
@@ -159,77 +229,31 @@ async fn main() -> Result<()> {
 
     // If the base path can't be canonicalized after we've guaranteed its creation, then something
     // is very wrong and we should bail out.
-    let base_path = fs::canonicalize(&config.path)?;
+    let base_path = Box::new(fs::canonicalize(&config.path)?);
+    let base_path: &'static PathBuf = Box::leak(base_path);
 
-    // let mut join_set = tokio::task::JoinSet::new();
-
-    match config.nofetch {
-        true => {
-            futures::stream::iter(repos)
-                .filter(|repo| no_existing_repo(&base_path, repo.name.clone()))
-                .map(|repo| clone_one_repo(&config, repo))
-                .buffer_unordered(6)
-                .for_each(|result| async {
-                    match result {
-                        Ok(_) => {},
-                        Err(e) => {println!("{}", e);}
+    let pool = ThreadPool::new(6);
+    for repo in repos {
+        pool.execute(move || {
+            match config.nofetch {
+                true => match no_existing_repo_sync(&base_path, repo.name.clone()) {
+                    true => {
+                        let _ = clone_one_repo_sync(&config, repo);
                     }
-                }).await;
-        },
-        false => {
-            futures::stream::iter(repos)
-                .map(|repo| clone_or_fetch_wrapper(&config, &base_path, repo))
-                .buffer_unordered(6)
-                .for_each(|result| async {
-                    match result {
-                        Ok(_) => {},
-                        Err(e) => {println!("{}", e);}
-                    }
-                }).await;
-        }
+                    false => {}
+                },
+                false => {
+                    let _ = clone_or_fetch_wrapper_sync(&config, &base_path, repo);
+                }
+            };
+        });
     }
-    // futures::stream::iter(repos)
-    //     .map(|repo| clone_or_fetch_wrapper(&config, &base_path, repo))
-    //     .buffer_unordered(6)
-    //     .for_each(|result| async {
-    //     match result {
-    //         Ok(_) => {},
-    //         Err(e) => {println!("{}", e);}
-    //     }
-    // }).await;
-
-
-
-
-    // for repo in repos {
-    //     match fs::exists(base_path.join(&repo.name)) {
-    //         Ok(exists) => match exists {
-    //             true => {
-    //                 if !config.nofetch {
-    //                     join_set.spawn(fetch_one_repo(repo.clone()));
-    //                 }
-    //             }
-    //             false => {
-    //                 join_set.spawn(clone_one_repo(repo.clone()));
-    //             }
-    //         },
-    //         Err(e) => {
-    //             eprintln!("Unable to handle path ending at '{}': {}", &repo.name, e);
-    //         }
-    //     }
-    // }
-    //
-    // join_set.join_all().await;
-    //
-    
 
     Ok(())
 }
 
-
 // Helper function to determine if a repo already exists by name
-async fn no_existing_repo(base_path: &PathBuf, name: String) -> bool {
-
+fn no_existing_repo_sync(base_path: &PathBuf, name: String) -> bool {
     match fs::exists(base_path.join(name)).ok() {
         Some(exists) => match exists {
             true => false,
@@ -239,15 +263,14 @@ async fn no_existing_repo(base_path: &PathBuf, name: String) -> bool {
     }
 }
 
+
 fn get_org_repositories(config: &Config, token: &str) -> Result<Vec<GHRepo>> {
-    let url_base = format!(
-        "https://api.github.com/orgs/{}/repos",
-        config.org);
+    let url_base = format!("https://api.github.com/orgs/{}/repos", config.org);
 
     let token_string = format!("Bearer {}", token);
 
     let repositories = ureq::get(url_base)
-        .query("per_page","100")
+        .query("per_page", "100")
         .header("User-Agent", "gorc")
         .header("Authorization", token_string)
         .header("Accept", "application/vnd.github+json")
@@ -322,16 +345,23 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
     None
 }
 
-async fn clone_or_fetch_wrapper(config: &Config, base_path: &PathBuf, repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
 
+fn clone_or_fetch_wrapper_sync(
+    config: &Config,
+    base_path: &PathBuf,
+    repo: GHRepo,
+) -> Result<std::process::ExitStatus, std::io::Error> {
     match fs::exists(base_path.join(&repo.name))? {
-        true => fetch_one_repo(config, repo).await,
-        false => clone_one_repo(config, repo).await,
+        true => fetch_one_repo_sync(config, repo),
+        false => clone_one_repo_sync(config, repo),
     }
 }
 
 /// Clone a single repository using either Git or JJ depending on the configuration
-async fn clone_one_repo(config: &Config, repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
+fn clone_one_repo_sync(
+    config: &Config,
+    repo: GHRepo,
+) -> Result<std::process::ExitStatus, std::io::Error> {
     let url = match config.transport {
         Transport::HTTP => &repo.clone_url,
         Transport::SSH => &repo.ssh_url,
@@ -349,30 +379,24 @@ async fn clone_one_repo(config: &Config, repo: GHRepo) -> Result<std::process::E
         }
     }
     let result = match config.vcs {
-        Vcs::Git => {
-            tokio::process::Command::new("git")
-                .current_dir(path)
-                .arg("clone")
-                .arg(&url)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()?
-                .wait()
-                .await
-        }
-        Vcs::JJ => {
-            tokio::process::Command::new("jj")
-                .current_dir(path)
-                .arg("git")
-                .arg("clone")
-                .arg("--colocate")
-                .arg(&url)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()?
-                .wait()
-                .await
-        }
+        Vcs::Git => std::process::Command::new("git")
+            .current_dir(path)
+            .arg("clone")
+            .arg(&url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?
+            .wait(),
+        Vcs::JJ => std::process::Command::new("jj")
+            .current_dir(path)
+            .arg("git")
+            .arg("clone")
+            .arg("--colocate")
+            .arg(&url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?
+            .wait(),
     };
     match config.verbosity {
         Verbosity::Quiet => {}
@@ -386,9 +410,13 @@ async fn clone_one_repo(config: &Config, repo: GHRepo) -> Result<std::process::E
 
     return result;
 }
+
 
 /// Fetch a single repo using either Git or JJ depending on the configuration
-async fn fetch_one_repo(config: &Config, repo: GHRepo) -> Result<std::process::ExitStatus, std::io::Error> {
+fn fetch_one_repo_sync(
+    config: &Config,
+    repo: GHRepo,
+) -> Result<std::process::ExitStatus, std::io::Error> {
     let url = match config.transport {
         Transport::HTTP => &repo.clone_url,
         Transport::SSH => &repo.ssh_url,
@@ -407,29 +435,23 @@ async fn fetch_one_repo(config: &Config, repo: GHRepo) -> Result<std::process::E
     }
 
     let result = match config.vcs {
-        Vcs::Git => {
-            tokio::process::Command::new("git")
-                .current_dir(path)
-                .arg("fetch")
-                .arg(&url)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()?
-                .wait()
-                .await
-        }
-        Vcs::JJ => {
-            tokio::process::Command::new("jj")
-                .current_dir(path)
-                .arg("git")
-                .arg("fetch")
-                .arg(&url)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()?
-                .wait()
-                .await
-        }
+        Vcs::Git => std::process::Command::new("git")
+            .current_dir(path)
+            .arg("fetch")
+            .arg(&url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?
+            .wait(),
+        Vcs::JJ => std::process::Command::new("jj")
+            .current_dir(path)
+            .arg("git")
+            .arg("fetch")
+            .arg(&url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?
+            .wait(),
     };
     match config.verbosity {
         Verbosity::Quiet => {}
@@ -443,3 +465,4 @@ async fn fetch_one_repo(config: &Config, repo: GHRepo) -> Result<std::process::E
 
     return result;
 }
+
