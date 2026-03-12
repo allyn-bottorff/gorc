@@ -375,7 +375,7 @@ async fn fetch_one_repo_sync(
     config: &Config,
     repo: GHRepo,
 ) -> Result<std::process::ExitStatus, std::io::Error> {
-    let path = fs::canonicalize(&config.path).unwrap();
+    let path = fs::canonicalize(&config.path).unwrap().join(&repo.name);
 
     match config.verbosity {
         Verbosity::Quiet => {}
