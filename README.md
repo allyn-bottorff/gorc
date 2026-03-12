@@ -4,11 +4,24 @@ This is simple utility for cloning all of the repositories in a GitHub
 organization. By default, it will clone any repositories that aren't already
 cloned to the specified path and fetch updates for the ones that do exist.
 
+This could be useful when you're starting with a new organization and want to
+explore the codebase. It's also useful when you want to use local search tools
+like ripgrep to find things across and entire organization's codebase and not
+rely on online search.
+
 Gorc attempts to pull GitHub credential information from the environment. First
 from the `gh` utility if it exists, then from an environment variable named
 `GITHUB_TOKEN` then from `GITHUB_PAT` in order of descending priority.
 
+
+## Installation
+
+`cargo install --git https://github.com/allyn-bottorff/gorc`
+
+
 ## Usage
+```
+gorc --help
 
 Usage: gorc [OPTIONS] --path <PATH> --org <ORG>
 
@@ -39,4 +52,4 @@ Options:
 
   -V, --version
           Print version
-
+```
