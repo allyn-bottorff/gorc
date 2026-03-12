@@ -14,9 +14,15 @@
 
 use anyhow::Result;
 use clap::Parser;
-use gorc::ThreadPool;
+use futures;
+use futures::StreamExt;
 use serde::Deserialize;
-use std::{env, fs, path::{Path,PathBuf}, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+use tokio;
 use ureq;
 
 /// GitHub Org Repository Clone (GORC)
@@ -158,27 +164,49 @@ fn main() -> Result<()> {
     let base_path = Box::new(fs::canonicalize(&config.path)?);
     let base_path: &'static PathBuf = Box::leak(base_path);
 
-    let pool = ThreadPool::new(6);
-    for repo in repos {
-        pool.execute(move || {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
             match config.nofetch {
                 true => {
-                    if no_existing_repo(base_path, repo.name.clone()) {
-                        let _ = clone_one_repo(config, repo);
-                    }
+                    futures::stream::iter(repos)
+                        .filter(|repo| no_existing_repo(&base_path, repo.name.clone()))
+                        .map(|repo| clone_one_repo(&config, repo))
+                        .buffer_unordered(100)
+                        .for_each(|result| async {
+                            match result {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    println!("{}", e);
+                                }
+                            }
+                        })
+                        .await;
                 }
                 false => {
-                    let _ = clone_or_fetch_wrapper(config, base_path, repo);
+                    futures::stream::iter(repos)
+                        .map(|repo| clone_or_fetch_wrapper(&config, &base_path, repo))
+                        .buffer_unordered(100)
+                        .for_each(|result| async {
+                            match result {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    println!("{}", e);
+                                }
+                            }
+                        })
+                        .await;
                 }
-            };
+            }
         });
-    }
 
     Ok(())
 }
 
 // Helper function to determine if a repo already exists by name
-fn no_existing_repo(base_path: &Path, name: String) -> bool {
+async fn no_existing_repo(base_path: &Path, name: String) -> bool {
     match fs::exists(base_path.join(name)).ok() {
         Some(exists) => match exists {
             true => false,
@@ -194,7 +222,6 @@ fn get_org_repositories(config: &Config, token: Option<String>) -> Result<Vec<GH
     let token = token.unwrap_or("".into());
 
     let token_string = format!("Bearer {}", token);
-
 
     let repositories = ureq::get(url_base)
         .query("per_page", "100")
@@ -272,19 +299,19 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
     None
 }
 
-fn clone_or_fetch_wrapper(
+async fn clone_or_fetch_wrapper(
     config: &Config,
     base_path: &Path,
     repo: GHRepo,
 ) -> Result<std::process::ExitStatus, std::io::Error> {
     match fs::exists(base_path.join(&repo.name))? {
-        true => fetch_one_repo_sync(config, repo),
-        false => clone_one_repo(config, repo),
+        true => fetch_one_repo_sync(config, repo).await,
+        false => clone_one_repo(config, repo).await,
     }
 }
 
 /// Clone a single repository using either Git or JJ depending on the configuration
-fn clone_one_repo(
+async fn clone_one_repo(
     config: &Config,
     repo: GHRepo,
 ) -> Result<std::process::ExitStatus, std::io::Error> {
@@ -305,24 +332,30 @@ fn clone_one_repo(
         }
     }
     let result = match config.vcs {
-        Vcs::Git => std::process::Command::new("git")
-            .current_dir(path)
-            .arg("clone")
-            .arg(url)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?
-            .wait(),
-        Vcs::JJ => std::process::Command::new("jj")
-            .current_dir(path)
-            .arg("git")
-            .arg("clone")
-            .arg("--colocate")
-            .arg(url)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?
-            .wait(),
+        Vcs::Git => {
+            tokio::process::Command::new("git")
+                .current_dir(path)
+                .arg("clone")
+                .arg(url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?
+                .wait()
+                .await
+        }
+        Vcs::JJ => {
+            tokio::process::Command::new("jj")
+                .current_dir(path)
+                .arg("git")
+                .arg("clone")
+                .arg("--colocate")
+                .arg(url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?
+                .wait()
+                .await
+        }
     };
     match config.verbosity {
         Verbosity::Quiet => {}
@@ -338,11 +371,10 @@ fn clone_one_repo(
 }
 
 /// Fetch a single repo using either Git or JJ depending on the configuration
-fn fetch_one_repo_sync(
+async fn fetch_one_repo_sync(
     config: &Config,
     repo: GHRepo,
 ) -> Result<std::process::ExitStatus, std::io::Error> {
-
     let path = fs::canonicalize(&config.path).unwrap();
 
     match config.verbosity {
@@ -356,21 +388,27 @@ fn fetch_one_repo_sync(
     }
 
     let result = match config.vcs {
-        Vcs::Git => std::process::Command::new("git")
-            .current_dir(path)
-            .arg("fetch")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?
-            .wait(),
-        Vcs::JJ => std::process::Command::new("jj")
-            .current_dir(path)
-            .arg("git")
-            .arg("fetch")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?
-            .wait(),
+        Vcs::Git => {
+            tokio::process::Command::new("git")
+                .current_dir(path)
+                .arg("fetch")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?
+                .wait()
+                .await
+        }
+        Vcs::JJ => {
+            tokio::process::Command::new("jj")
+                .current_dir(path)
+                .arg("git")
+                .arg("fetch")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?
+                .wait()
+                .await
+        }
     };
     match config.verbosity {
         Verbosity::Quiet => {}
