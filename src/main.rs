@@ -19,10 +19,9 @@ use std::{
     env, fs,
     path::PathBuf,
     process::Command,
-    sync::{Arc, Mutex, mpsc},
-    thread,
 };
 use ureq;
+use gorc::ThreadPool;
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -102,7 +101,7 @@ struct Config {
     path: String,
 }
 impl Config {
-    fn new_from_flags(flags: &CliFlags) -> Config {
+    pub fn new_from_flags(flags: &CliFlags) -> Config {
         let transport = match flags.http {
             true => Transport::HTTP,
             false => Transport::SSH,
@@ -130,77 +129,6 @@ impl Config {
     }
 }
 
-pub struct ThreadPool {
-    workers: Vec<Worker>,
-    sender: Option<mpsc::Sender<Job>>,
-}
-impl ThreadPool {
-    pub fn new(size: usize) -> ThreadPool {
-        assert!(size > 0);
-
-        let (sender, receiver) = mpsc::channel();
-        let receiver = Arc::new(Mutex::new(receiver));
-        let mut workers = Vec::with_capacity(size);
-
-        for _id in 0..size {
-            workers.push(Worker::new(Arc::clone(&receiver)));
-        }
-
-        ThreadPool {
-            workers,
-            sender: Some(sender),
-        }
-    }
-
-    pub fn execute<F>(&self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        let job = Box::new(f);
-        self.sender.as_ref().unwrap().send(job).unwrap();
-    }
-}
-
-impl Drop for ThreadPool {
-    fn drop(&mut self) {
-        drop(self.sender.take());
-        for worker in &mut self.workers {
-            if let Some(thread) = worker.thread.take() {
-                thread.join().unwrap();
-            }
-        }
-    }
-}
-
-type Job = Box<dyn FnOnce() + Send + 'static>;
-
-struct Worker {
-    // id: usize,
-    thread: Option<thread::JoinHandle<()>>,
-}
-impl Worker {
-    fn new(receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
-        let thread = thread::spawn(move || {
-            loop {
-                let message = receiver.lock().unwrap().recv();
-
-                match message {
-                    Ok(job) => {
-                        job();
-                    }
-                    Err(_) => {
-                        break;
-                    }
-                }
-            }
-        });
-
-        Worker {
-            // id,
-            thread: Some(thread),
-        }
-    }
-}
 
 fn main() -> Result<()> {
     let cli_flags = CliFlags::parse();
@@ -236,14 +164,14 @@ fn main() -> Result<()> {
     for repo in repos {
         pool.execute(move || {
             match config.nofetch {
-                true => match no_existing_repo_sync(&base_path, repo.name.clone()) {
+                true => match no_existing_repo(&base_path, repo.name.clone()) {
                     true => {
-                        let _ = clone_one_repo_sync(&config, repo);
+                        let _ = clone_one_repo(&config, repo);
                     }
                     false => {}
                 },
                 false => {
-                    let _ = clone_or_fetch_wrapper_sync(&config, &base_path, repo);
+                    let _ = clone_or_fetch_wrapper(&config, &base_path, repo);
                 }
             };
         });
@@ -253,7 +181,7 @@ fn main() -> Result<()> {
 }
 
 // Helper function to determine if a repo already exists by name
-fn no_existing_repo_sync(base_path: &PathBuf, name: String) -> bool {
+fn no_existing_repo(base_path: &PathBuf, name: String) -> bool {
     match fs::exists(base_path.join(name)).ok() {
         Some(exists) => match exists {
             true => false,
@@ -346,19 +274,19 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
 }
 
 
-fn clone_or_fetch_wrapper_sync(
+fn clone_or_fetch_wrapper(
     config: &Config,
     base_path: &PathBuf,
     repo: GHRepo,
 ) -> Result<std::process::ExitStatus, std::io::Error> {
     match fs::exists(base_path.join(&repo.name))? {
         true => fetch_one_repo_sync(config, repo),
-        false => clone_one_repo_sync(config, repo),
+        false => clone_one_repo(config, repo),
     }
 }
 
 /// Clone a single repository using either Git or JJ depending on the configuration
-fn clone_one_repo_sync(
+fn clone_one_repo(
     config: &Config,
     repo: GHRepo,
 ) -> Result<std::process::ExitStatus, std::io::Error> {
