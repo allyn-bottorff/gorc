@@ -133,8 +133,13 @@ impl Config {
 fn main() -> Result<()> {
     let cli_flags = CliFlags::parse();
 
-    let token =
-        get_github_token(&cli_flags).expect("Unable to get GitHub token from the environment.");
+    let token = get_github_token(&cli_flags);
+
+    if let None = token {
+        println!("Unable to get a GitHub token from the environment");
+    }
+
+
 
     // Create the static CONFIG struct that can be freely referenced everywhere
     // Abort if this doesn't succeed.
@@ -144,7 +149,7 @@ fn main() -> Result<()> {
     // Create a reference for the config for this scope that's a little more ergonomic. If this
     // can't be accessed, abort.
 
-    let repos = match get_org_repositories(&config, &token) {
+    let repos = match get_org_repositories(&config, token) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to get org repositories: {}\n", e);
@@ -192,8 +197,13 @@ fn no_existing_repo(base_path: &PathBuf, name: String) -> bool {
 }
 
 
-fn get_org_repositories(config: &Config, token: &str) -> Result<Vec<GHRepo>> {
+fn get_org_repositories(config: &Config, token: Option<String>) -> Result<Vec<GHRepo>> {
     let url_base = format!("https://api.github.com/orgs/{}/repos", config.org);
+
+    let token = match token {
+        Some(t) => t,
+        None => "".into(),
+    };
 
     let token_string = format!("Bearer {}", token);
 
