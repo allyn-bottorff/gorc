@@ -14,14 +14,10 @@
 
 use anyhow::Result;
 use clap::Parser;
-use serde::Deserialize;
-use std::{
-    env, fs,
-    path::PathBuf,
-    process::Command,
-};
-use ureq;
 use gorc::ThreadPool;
+use serde::Deserialize;
+use std::{env, fs, path::{Path,PathBuf}, process::Command};
+use ureq;
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -58,8 +54,8 @@ struct CliFlags {
 /// Determines whether to perform Git operations over HTTP or SSH
 #[derive(Debug)]
 enum Transport {
-    HTTP,
-    SSH,
+    Http,
+    Ssh,
 }
 
 /// Determines whether to use native Git repositories or git-backed Jujutsu repositories. In the JJ
@@ -103,8 +99,8 @@ struct Config {
 impl Config {
     pub fn new_from_flags(flags: &CliFlags) -> Config {
         let transport = match flags.http {
-            true => Transport::HTTP,
-            false => Transport::SSH,
+            true => Transport::Http,
+            false => Transport::Ssh,
         };
         let verbosity = match flags.quiet {
             true => Verbosity::Quiet,
@@ -129,17 +125,14 @@ impl Config {
     }
 }
 
-
 fn main() -> Result<()> {
     let cli_flags = CliFlags::parse();
 
     let token = get_github_token(&cli_flags);
 
-    if let None = token {
+    if token.is_none() {
         println!("Unable to get a GitHub token from the environment");
     }
-
-
 
     // Create the static CONFIG struct that can be freely referenced everywhere
     // Abort if this doesn't succeed.
@@ -149,11 +142,11 @@ fn main() -> Result<()> {
     // Create a reference for the config for this scope that's a little more ergonomic. If this
     // can't be accessed, abort.
 
-    let repos = match get_org_repositories(&config, token) {
+    let repos = match get_org_repositories(config, token) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to get org repositories: {}\n", e);
-            panic!();
+            return Err(e);
         }
     };
 
@@ -169,14 +162,13 @@ fn main() -> Result<()> {
     for repo in repos {
         pool.execute(move || {
             match config.nofetch {
-                true => match no_existing_repo(&base_path, repo.name.clone()) {
-                    true => {
-                        let _ = clone_one_repo(&config, repo);
+                true => {
+                    if no_existing_repo(base_path, repo.name.clone()) {
+                        let _ = clone_one_repo(config, repo);
                     }
-                    false => {}
-                },
+                }
                 false => {
-                    let _ = clone_or_fetch_wrapper(&config, &base_path, repo);
+                    let _ = clone_or_fetch_wrapper(config, base_path, repo);
                 }
             };
         });
@@ -186,7 +178,7 @@ fn main() -> Result<()> {
 }
 
 // Helper function to determine if a repo already exists by name
-fn no_existing_repo(base_path: &PathBuf, name: String) -> bool {
+fn no_existing_repo(base_path: &Path, name: String) -> bool {
     match fs::exists(base_path.join(name)).ok() {
         Some(exists) => match exists {
             true => false,
@@ -196,16 +188,13 @@ fn no_existing_repo(base_path: &PathBuf, name: String) -> bool {
     }
 }
 
-
 fn get_org_repositories(config: &Config, token: Option<String>) -> Result<Vec<GHRepo>> {
     let url_base = format!("https://api.github.com/orgs/{}/repos", config.org);
 
-    let token = match token {
-        Some(t) => t,
-        None => "".into(),
-    };
+    let token = token.unwrap_or("".into());
 
     let token_string = format!("Bearer {}", token);
+
 
     let repositories = ureq::get(url_base)
         .query("per_page", "100")
@@ -230,7 +219,7 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
             match String::from_utf8(token.stdout) {
                 Ok(token) => {
                     //TODO(alb): Validate the token
-                    if token != "" {
+                    if !token.is_empty() {
                         let token: String = token.trim().into();
                         return Some(token);
                     }
@@ -254,7 +243,7 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
         Ok(token) => {
             //TODO(alb): Improve the token validation
             let token: String = token.trim().into();
-            if token != "" {
+            if !token.is_empty() {
                 return Some(token);
             }
         }
@@ -270,7 +259,7 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
         Ok(token) => {
             //TODO(alb): Improve the token validation
             let token: String = token.trim().into();
-            if token != "" {
+            if !token.is_empty() {
                 return Some(token);
             }
         }
@@ -283,10 +272,9 @@ fn get_github_token(cli_flags: &CliFlags) -> Option<String> {
     None
 }
 
-
 fn clone_or_fetch_wrapper(
     config: &Config,
-    base_path: &PathBuf,
+    base_path: &Path,
     repo: GHRepo,
 ) -> Result<std::process::ExitStatus, std::io::Error> {
     match fs::exists(base_path.join(&repo.name))? {
@@ -301,8 +289,8 @@ fn clone_one_repo(
     repo: GHRepo,
 ) -> Result<std::process::ExitStatus, std::io::Error> {
     let url = match config.transport {
-        Transport::HTTP => &repo.clone_url,
-        Transport::SSH => &repo.ssh_url,
+        Transport::Http => &repo.clone_url,
+        Transport::Ssh => &repo.ssh_url,
     };
 
     let path = fs::canonicalize(&config.path).unwrap();
@@ -320,7 +308,7 @@ fn clone_one_repo(
         Vcs::Git => std::process::Command::new("git")
             .current_dir(path)
             .arg("clone")
-            .arg(&url)
+            .arg(url)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?
@@ -330,7 +318,7 @@ fn clone_one_repo(
             .arg("git")
             .arg("clone")
             .arg("--colocate")
-            .arg(&url)
+            .arg(url)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?
@@ -349,16 +337,11 @@ fn clone_one_repo(
     return result;
 }
 
-
 /// Fetch a single repo using either Git or JJ depending on the configuration
 fn fetch_one_repo_sync(
     config: &Config,
     repo: GHRepo,
 ) -> Result<std::process::ExitStatus, std::io::Error> {
-    let url = match config.transport {
-        Transport::HTTP => &repo.clone_url,
-        Transport::SSH => &repo.ssh_url,
-    };
 
     let path = fs::canonicalize(&config.path).unwrap();
 
@@ -376,7 +359,6 @@ fn fetch_one_repo_sync(
         Vcs::Git => std::process::Command::new("git")
             .current_dir(path)
             .arg("fetch")
-            .arg(&url)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?
@@ -385,7 +367,6 @@ fn fetch_one_repo_sync(
             .current_dir(path)
             .arg("git")
             .arg("fetch")
-            .arg(&url)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?
@@ -403,4 +384,3 @@ fn fetch_one_repo_sync(
 
     return result;
 }
-

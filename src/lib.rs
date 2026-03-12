@@ -1,5 +1,7 @@
-use std::{thread,sync::{Arc,Mutex,mpsc}};
-
+use std::{
+    sync::{Arc, Mutex, mpsc},
+    thread,
+};
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
