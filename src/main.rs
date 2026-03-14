@@ -24,6 +24,7 @@ use std::{
 };
 use tokio;
 use ureq;
+use url;
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -216,25 +217,70 @@ async fn no_existing_repo(base_path: &Path, name: String) -> bool {
     }
 }
 
+/// Get organization's repository list from the GitHub API
 fn get_org_repositories(config: &Config, token: Option<String>) -> Result<Vec<GHRepo>> {
-    let url_base = format!("https://api.github.com/orgs/{}/repos", config.org);
+    let mut url = format!("https://api.github.com/orgs/{}/repos?per_page=100", config.org);
 
     let token = token.unwrap_or("".into());
 
     let token_string = format!("Bearer {}", token);
 
-    let repositories = ureq::get(url_base)
-        .query("per_page", "100")
-        .header("User-Agent", "gorc")
-        .header("Authorization", token_string)
-        .header("Accept", "application/vnd.github+json")
-        .call()?
-        .body_mut()
-        .read_json::<Vec<GHRepo>>()?;
+    let mut pagination_required = true;
 
-    // TODO(alb): Handle request pagination
+    let mut repositories = Vec::new();
+
+
+    while pagination_required {
+        dbg!(&url);
+        let mut resp = ureq::get(&url)
+            .header("User-Agent", "gorc")
+            .header("Authorization", &token_string)
+            .header("Accept", "application/vnd.github+json")
+            .call()?;
+
+        repositories.append(&mut resp.body_mut().read_json()?);
+
+        let link_header = resp.headers().get("link");
+
+        dbg!(&link_header);
+        match link_header {
+            Some(link) => match check_pagination(link.to_str()?) {
+                Some(next_url) => {
+                    dbg!(&next_url);
+                    url = next_url;
+                }
+                None => {
+                    pagination_required = false;
+                }
+            },
+            None => {
+                pagination_required = false;
+            }
+        }
+    }
 
     Ok(repositories)
+}
+
+fn check_pagination(link_header: &str) -> Option<String> {
+    let next_link_identifier = "rel=\"next\"";
+    if link_header.contains(&next_link_identifier) {
+        let parts = link_header.split(",");
+
+        for part in parts {
+            let part = part.trim();
+            if part.contains(&next_link_identifier) {
+                match part.split_once(";") {
+                    Some(n) => {
+                        let trimmed = n.0.trim().trim_end_matches('>').trim_start_matches('<');
+                        return Some(trimmed.to_owned());
+                    }
+                    None => return None,
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Get GitHub token from the environment. Early return on successfully finding a token
@@ -421,4 +467,30 @@ async fn fetch_one_repo_sync(
     }
 
     return result;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_found_link_header() {
+        let sample = r#"<https://api.github.com/repositories/1300192/issues?page=2>; rel="prev", <https://api.github.com/repositories/1300192/issues?page=4>; rel="next", <https://api.github.com/repositories/1300192/issues?page=515>; rel="last", <https://api.github.com/repositories/1300192/issues?page=1>; rel="first""#;
+
+        let next_url = check_pagination(sample);
+
+        assert_eq!(
+            next_url,
+            Some("https://api.github.com/repositories/1300192/issues?page=4".to_owned())
+        )
+    }
+
+    #[test]
+    fn parse_no_found_link_header() {
+        let sample = r#"<https://api.github.com/repositories/1300192/issues?page=2>; rel="prev", <https://api.github.com/repositories/1300192/issues?page=4>; rel="last", <https://api.github.com/repositories/1300192/issues?page=1>; rel="first""#;
+
+        let next_url = check_pagination(sample);
+
+        assert_eq!(next_url, None,)
+    }
 }
