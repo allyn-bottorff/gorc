@@ -24,7 +24,6 @@ use std::{
 };
 use tokio;
 use ureq;
-use url;
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -149,13 +148,26 @@ fn main() -> Result<()> {
     // Create a reference for the config for this scope that's a little more ergonomic. If this
     // can't be accessed, abort.
 
+    match &config.verbosity {
+        Verbosity::Quiet => {}
+        _ => {
+            print!("Getting org repository list... ");
+        }
+    }
     let repos = match get_org_repositories(config, token) {
         Ok(r) => r,
         Err(e) => {
+            eprintln!();
             eprintln!("Failed to get org repositories: {}\n", e);
             return Err(e);
         }
     };
+    match &config.verbosity {
+        Verbosity::Quiet => {}
+        _ => {
+            println!("Complete!");
+        }
+    }
 
     // Create the requested path if it doesn't exist. Abort if this cannot be created.
     fs::create_dir_all(&config.path)?;
@@ -180,7 +192,7 @@ fn main() -> Result<()> {
                             match result {
                                 Ok(_) => {}
                                 Err(e) => {
-                                    println!("{}", e);
+                                    eprintln!("{}", e);
                                 }
                             }
                         })
@@ -194,7 +206,7 @@ fn main() -> Result<()> {
                             match result {
                                 Ok(_) => {}
                                 Err(e) => {
-                                    println!("{}", e);
+                                    eprintln!("{}", e);
                                 }
                             }
                         })
@@ -219,7 +231,10 @@ async fn no_existing_repo(base_path: &Path, name: String) -> bool {
 
 /// Get organization's repository list from the GitHub API
 fn get_org_repositories(config: &Config, token: Option<String>) -> Result<Vec<GHRepo>> {
-    let mut url = format!("https://api.github.com/orgs/{}/repos?per_page=100", config.org);
+    let mut url = format!(
+        "https://api.github.com/orgs/{}/repos?per_page=100",
+        config.org
+    );
 
     let token = token.unwrap_or("".into());
 
@@ -229,9 +244,7 @@ fn get_org_repositories(config: &Config, token: Option<String>) -> Result<Vec<GH
 
     let mut repositories = Vec::new();
 
-
     while pagination_required {
-        dbg!(&url);
         let mut resp = ureq::get(&url)
             .header("User-Agent", "gorc")
             .header("Authorization", &token_string)
@@ -242,11 +255,9 @@ fn get_org_repositories(config: &Config, token: Option<String>) -> Result<Vec<GH
 
         let link_header = resp.headers().get("link");
 
-        dbg!(&link_header);
         match link_header {
             Some(link) => match check_pagination(link.to_str()?) {
                 Some(next_url) => {
-                    dbg!(&next_url);
                     url = next_url;
                 }
                 None => {
@@ -370,10 +381,7 @@ async fn clone_one_repo(
 
     match config.verbosity {
         Verbosity::Quiet => {}
-        Verbosity::Normal => {
-            println!("Cloning:     {}", &repo.name);
-        }
-        Verbosity::Verbose => {
+        _ => {
             println!("Cloning:     {}", &repo.name);
         }
     }
@@ -405,10 +413,7 @@ async fn clone_one_repo(
     };
     match config.verbosity {
         Verbosity::Quiet => {}
-        Verbosity::Normal => {
-            println!("Complete:    {}", &repo.name);
-        }
-        Verbosity::Verbose => {
+        _ => {
             println!("Complete:    {}", &repo.name);
         }
     }
@@ -425,10 +430,7 @@ async fn fetch_one_repo_sync(
 
     match config.verbosity {
         Verbosity::Quiet => {}
-        Verbosity::Normal => {
-            println!("Fetching:    {}", &repo.name);
-        }
-        Verbosity::Verbose => {
+        _ => {
             println!("Fetching:    {}", &repo.name);
         }
     }
@@ -458,10 +460,7 @@ async fn fetch_one_repo_sync(
     };
     match config.verbosity {
         Verbosity::Quiet => {}
-        Verbosity::Normal => {
-            println!("Complete:    {}", &repo.name);
-        }
-        Verbosity::Verbose => {
+        _ => {
             println!("Complete:    {}", &repo.name);
         }
     }
