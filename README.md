@@ -16,7 +16,7 @@ from the `gh` utility if it exists, then from an environment variable named
 
 ## Installation
 
-`cargo install --git https://github.com/allyn-bottorff/gorc`
+`cargo install gorc`
 
 
 ## Usage
