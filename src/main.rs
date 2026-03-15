@@ -14,7 +14,6 @@
 
 use anyhow::Result;
 use clap::Parser;
-use futures;
 use futures::StreamExt;
 use serde::Deserialize;
 use std::{
@@ -22,8 +21,6 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use tokio;
-use ureq;
 
 /// GitHub Org Repository Clone (GORC)
 ///
@@ -185,8 +182,8 @@ fn main() -> Result<()> {
             match config.nofetch {
                 true => {
                     futures::stream::iter(repos)
-                        .filter(|repo| no_existing_repo(&base_path, repo.name.clone()))
-                        .map(|repo| clone_one_repo(&config, repo))
+                        .filter(|repo| no_existing_repo(base_path, repo.name.clone()))
+                        .map(|repo| clone_one_repo(config, repo))
                         .buffer_unordered(100)
                         .for_each(|result| async {
                             match result {
@@ -200,7 +197,7 @@ fn main() -> Result<()> {
                 }
                 false => {
                     futures::stream::iter(repos)
-                        .map(|repo| clone_or_fetch_wrapper(&config, &base_path, repo))
+                        .map(|repo| clone_or_fetch_wrapper(config, base_path, repo))
                         .buffer_unordered(100)
                         .for_each(|result| async {
                             match result {
@@ -275,12 +272,12 @@ fn get_org_repositories(config: &Config, token: Option<String>) -> Result<Vec<GH
 
 fn check_pagination(link_header: &str) -> Option<String> {
     let next_link_identifier = "rel=\"next\"";
-    if link_header.contains(&next_link_identifier) {
+    if link_header.contains(next_link_identifier) {
         let parts = link_header.split(",");
 
         for part in parts {
             let part = part.trim();
-            if part.contains(&next_link_identifier) {
+            if part.contains(next_link_identifier) {
                 match part.split_once(";") {
                     Some(n) => {
                         let trimmed = n.0.trim().trim_end_matches('>').trim_start_matches('<');
@@ -418,7 +415,7 @@ async fn clone_one_repo(
         }
     }
 
-    return result;
+    result
 }
 
 /// Fetch a single repo using either Git or JJ depending on the configuration
@@ -465,7 +462,7 @@ async fn fetch_one_repo_sync(
         }
     }
 
-    return result;
+    result
 }
 
 #[cfg(test)]
