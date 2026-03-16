@@ -1,12 +1,13 @@
 [package]
 name = "gorc"
-version = "1.0.0"
+version = "1.0.1"
 authors = ["Allyn Bottorff"]
 license = "Apache-2.0"
 edition = "2024"
 repository = "https://github.com/allyn-bottorff/gorc"
 description = "GitHub Org Repostiory Clone (GORC) - A clone and fetch tool for entire GitHub organizations"
 readme = "README.md"
+keywords = ["cli", "github", "org", "jj", "git"]
 
 [dependencies]
 anyhow = "1.0.102"
